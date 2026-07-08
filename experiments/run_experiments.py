@@ -59,6 +59,7 @@ def base_config(args) -> ExperimentConfig:
     cfg.data.max_windows_per_subject = args.max_windows_per_subject
     cfg.backbone.freeze_backbone = not args.unfreeze_backbone
     cfg.backbone.lora_rank = args.lora_rank
+    cfg.backbone.init_checkpoint = args.init_backbone_checkpoint or None
     cfg.data.synthetic_if_missing = not args.no_synthetic
     cfg.train.early_stopping_patience = args.patience
     cfg.compiler.structure_loss_weight = args.structure_loss_weight
@@ -79,6 +80,14 @@ def run_single(
     cfg.data.holdout_sensor = holdout_sensor
     cfg.data.label_fraction = label_fraction
     cfg.train.seed = seed
+    if cfg.backbone.init_checkpoint:
+        cfg.backbone.init_checkpoint = cfg.backbone.init_checkpoint.format(
+            holdout=holdout_sensor,
+            method=method,
+            seed=seed,
+            label_fraction=label_fraction,
+            ablation=ablation,
+        )
 
     if ablation == "no_sensor_id":
         cfg.sensor_meta.drop_sensor_name = True
@@ -236,6 +245,7 @@ def main() -> None:
     parser.add_argument("--max-windows-per-subject", type=int, default=80)
     parser.add_argument("--structure-loss-weight", type=float, default=0.01)
     parser.add_argument("--lora-rank", type=int, default=8)
+    parser.add_argument("--init-backbone-checkpoint", default="")
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--no-synthetic", action="store_true")
     args = parser.parse_args()

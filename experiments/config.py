@@ -74,6 +74,7 @@ class BackboneConfig:
     dropout: float = 0.1
     freeze_backbone: bool = True
     lora_rank: int = 8
+    init_checkpoint: Optional[str] = None
 
     # MOMENT feature mode is a baseline only; true prefix injection requires an
     # exposed patch embedding + encoder path.

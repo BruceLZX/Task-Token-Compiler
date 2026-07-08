@@ -99,6 +99,7 @@ class DataConfig:
     test_subject_frac: float = 0.2
     label_fraction: float = 1.0
     synthetic_if_missing: bool = True
+    max_windows_per_subject: int = 80
 
 
 @dataclass

@@ -269,7 +269,7 @@ class WESADParquetDataset(Dataset):
         parquet_files: Sequence[Path],
         sensor: str,
         window_len: int,
-        max_rows: int | None = None,
+        max_windows_per_subject: int | None = None,
     ):
         if sensor not in self.SENSOR_COLUMNS:
             raise ValueError(f"Parquet WESAD source does not contain sensor={sensor}")
@@ -285,8 +285,17 @@ class WESADParquetDataset(Dataset):
         cols = self.SENSOR_COLUMNS[sensor]
         select_cols = ", ".join(cols + ["stress", "user"])
         files_sql = ", ".join([f"'{str(p)}'" for p in parquet_files])
-        limit_sql = f" LIMIT {int(max_rows)}" if max_rows else ""
-        query = f"SELECT {select_cols} FROM read_parquet([{files_sql}]) WHERE stress IS NOT NULL{limit_sql}"
+        if max_windows_per_subject:
+            # Keep smoke runs tractable without collapsing to a one-class shard:
+            # sample up to N windows for each subject/class pair.
+            base = (
+                f"SELECT {select_cols}, "
+                "row_number() OVER (PARTITION BY user, stress ORDER BY random()) AS _rn "
+                f"FROM read_parquet([{files_sql}]) WHERE stress IS NOT NULL"
+            )
+            query = f"SELECT {select_cols} FROM ({base}) WHERE _rn <= {int(max_windows_per_subject)}"
+        else:
+            query = f"SELECT {select_cols} FROM read_parquet([{files_sql}]) WHERE stress IS NOT NULL"
         df = duckdb.connect().execute(query).fetchdf()
         for _, row in df.iterrows():
             arrays = [np.asarray(row[col], dtype=np.float32) for col in cols]
@@ -415,7 +424,7 @@ def load_wesad_sensor(
                 parquet_files,
                 sensor=sensor,
                 window_len=window_len,
-                max_rows=max_windows_per_subject,
+                max_windows_per_subject=max_windows_per_subject,
             )
 
     if not signals:
@@ -525,9 +534,15 @@ def split_by_subject(
     val_frac: float,
     test_frac: float,
     seed: int,
+    allow_row_split: bool = False,
 ) -> Tuple[Subset, Subset, Subset]:
     subjects = np.array(sorted(set(dataset.subjects)))
     if len(subjects) < 3:
+        if not allow_row_split:
+            raise ValueError(
+                f"Need at least 3 subjects for subject-level splitting; found {len(subjects)}. "
+                "Download a full WESAD parquet file instead of a converted smoke shard."
+            )
         # Tiny downloaded shards may contain only one subject. This fallback is
         # for smoke tests only; paper-grade runs must use subject-level splits.
         rng = np.random.default_rng(seed)
@@ -560,6 +575,29 @@ def split_by_subject(
         elif sample.subject in train_subjects:
             train_idx.append(idx)
     return Subset(dataset, train_idx), Subset(dataset, val_idx), Subset(dataset, test_idx)
+
+
+def _labels_and_subjects(dataset: Dataset) -> Tuple[List[int], List[str]]:
+    labels: List[int] = []
+    subjects: List[str] = []
+    for i in range(len(dataset)):
+        item = dataset[i]
+        labels.append(int(item["y"]))
+        subjects.append(str(item["subject"]))
+    return labels, subjects
+
+
+def validate_split_quality(name: str, dataset: Dataset, min_classes: int = 2) -> None:
+    labels, subjects = _labels_and_subjects(dataset)
+    if not labels:
+        raise ValueError(f"{name} split is empty")
+    classes = sorted(set(labels))
+    if len(classes) < min_classes:
+        raise ValueError(
+            f"{name} split has only {len(classes)} class(es), labels={classes}, "
+            f"samples={len(labels)}, subjects={len(set(subjects))}. "
+            "This run is not paper-grade; use a fuller dataset shard or adjust split fractions."
+        )
 
 
 def limit_label_fraction(dataset: Dataset, fraction: float, seed: int) -> Dataset:
@@ -651,6 +689,9 @@ def build_wesad_loso_loaders(
 
     train_ds = ConcatDataset(train_parts)
     val_ds = ConcatDataset(val_parts)
+    validate_split_quality("train", train_ds)
+    validate_split_quality("val", val_ds)
+    validate_split_quality("test", test_ds)
     num_classes = max(
         [getattr(part.dataset if isinstance(part, Subset) else part, "num_classes", 2) for part in train_parts + [test_ds]]
     )

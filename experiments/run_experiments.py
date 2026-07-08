@@ -56,6 +56,7 @@ def base_config(args) -> ExperimentConfig:
     cfg.data.batch_size = args.batch_size
     cfg.data.window_len = args.window_len
     cfg.data.num_workers = args.num_workers
+    cfg.data.max_windows_per_subject = args.max_windows_per_subject
     cfg.backbone.freeze_backbone = not args.unfreeze_backbone
     cfg.backbone.lora_rank = args.lora_rank
     cfg.data.synthetic_if_missing = not args.no_synthetic
@@ -116,7 +117,7 @@ def run_single(
         label_fraction=cfg.data.label_fraction,
         seed=cfg.train.seed,
         synthetic_if_missing=cfg.data.synthetic_if_missing,
-        max_windows_per_subject=80,
+        max_windows_per_subject=cfg.data.max_windows_per_subject,
     )
     cfg.data.num_classes = int(loaders.get("num_classes", cfg.data.num_classes))
     out_dir = run_root / f"method={cfg.method}" / f"holdout={holdout_sensor}" / f"labels={label_fraction}" / f"seed={seed}" / f"ablation={ablation}"
@@ -232,6 +233,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--window-len", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--max-windows-per-subject", type=int, default=80)
     parser.add_argument("--structure-loss-weight", type=float, default=0.01)
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--unfreeze-backbone", action="store_true")

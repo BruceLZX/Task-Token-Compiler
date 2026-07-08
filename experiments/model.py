@@ -90,6 +90,15 @@ class LoRALinear(nn.Module):
     def forward(self, x):
         return self.base(x) + self.lora_b(self.lora_a(x)) * (self.alpha / self.rank)
 
+    @property
+    def weight(self):
+        # PyTorch TransformerEncoderLayer fast paths read .weight/.bias directly.
+        return self.base.weight
+
+    @property
+    def bias(self):
+        return self.base.bias
+
 
 def apply_lora_to_transformer_ffn(module: nn.Module, rank: int = 8) -> None:
     """Apply LoRA to Transformer feed-forward Linear layers."""

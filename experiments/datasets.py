@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 
@@ -308,6 +309,11 @@ def load_wesad_sensor(
         labels[subject_dir.name] = label[:n]
 
     if not signals:
+        csv_path = root / "WESAD_raw_data.csv"
+        if csv_path.exists():
+            signals, labels = load_wesad_csv_columns(csv_path, sensor)
+
+    if not signals:
         if not synthetic_if_missing:
             raise FileNotFoundError(f"No preprocessed WESAD files found under {root}")
         logger.warning("WESAD %s not found. Using synthetic smoke-test data.", sensor)
@@ -326,6 +332,82 @@ def load_wesad_sensor(
         window_len=window_len,
         max_windows_per_subject=max_windows_per_subject,
     )
+
+
+def _condition_to_stress_label(value) -> int:
+    text = str(value).strip().lower()
+    if text in {"1", "baseline", "base"}:
+        return 0
+    if text in {"2", "stress"}:
+        return 1
+    if text in {"3", "amusement", "amuse"}:
+        return 2
+    # Treat meditation as non-stress baseline-like for binary/3-class fallback.
+    if text in {"4", "meditation", "meditate"}:
+        return 0
+    return -1
+
+
+def _candidate_columns(sensor: str, columns: Sequence[str]) -> List[str]:
+    """Find plausible WESAD raw CSV columns for a sensor."""
+    lower_to_original = {c.lower(): c for c in columns}
+    candidates: List[str] = []
+    aliases = {
+        "ecg": ["ecg"],
+        "eda": ["eda", "gsr"],
+        "bvp": ["bvp", "ppg"],
+        "acc": ["acc", "acc_x", "acc_y", "acc_z"],
+        "temp": ["temp", "temperature"],
+        "resp": ["resp", "respiration"],
+    }[sensor]
+    for col in columns:
+        lc = col.lower()
+        if any(alias in lc for alias in aliases):
+            # Avoid selecting derived label/meta columns.
+            if not any(skip in lc for skip in ["label", "condition", "subject", "time", "sssq"]):
+                candidates.append(col)
+    if sensor == "acc" and len(candidates) > 3:
+        # Keep tri-axial raw-ish columns if available.
+        axis_cols = [c for c in candidates if any(ax in c.lower() for ax in ["x", "y", "z"])]
+        if axis_cols:
+            candidates = axis_cols[:3]
+    return candidates[:3] if sensor == "acc" else candidates[:1]
+
+
+def load_wesad_csv_columns(csv_path: Path, sensor: str) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """
+    Load the public Hugging Face WESAD_raw_data.csv feature table.
+
+    This file is feature-level rather than raw waveform-level. It is valid for
+    a real-data smoke/P0 adaptation test, but paper-grade results should prefer
+    raw or uniformly preprocessed WESAD windows when available.
+    """
+    header = pd.read_csv(csv_path, nrows=0)
+    columns = list(header.columns)
+    subject_col = next((c for c in columns if c.lower() in {"subject_id", "subject", "sid"}), None)
+    condition_col = next((c for c in columns if c.lower() in {"condition", "label", "class"}), None)
+    if subject_col is None or condition_col is None:
+        raise ValueError(f"Could not find subject/condition columns in {csv_path}")
+    sensor_cols = _candidate_columns(sensor, columns)
+    if not sensor_cols:
+        raise ValueError(f"Could not find columns for sensor={sensor} in {csv_path}")
+    usecols = [subject_col, condition_col] + sensor_cols
+    df = pd.read_csv(csv_path, usecols=usecols)
+    df["_label"] = df[condition_col].map(_condition_to_stress_label).astype(np.int64)
+    df = df[df["_label"] >= 0]
+    signals: Dict[str, np.ndarray] = {}
+    labels: Dict[str, np.ndarray] = {}
+    for subject, group in df.groupby(subject_col, sort=True):
+        values = group[sensor_cols].to_numpy(dtype=np.float32)
+        if values.ndim == 2 and values.shape[1] == 1:
+            values = values[:, 0]
+        subject_name = str(subject)
+        if not subject_name.upper().startswith("S"):
+            subject_name = f"S{subject_name}"
+        signals[subject_name] = values
+        labels[subject_name] = group["_label"].to_numpy(dtype=np.int64)
+    logger.info("Loaded %s from %s columns=%s subjects=%d", sensor, csv_path, sensor_cols, len(signals))
+    return signals, labels
 
 
 def split_by_subject(

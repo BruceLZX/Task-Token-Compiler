@@ -38,6 +38,16 @@ data/wesad/S2/labels.npy
 If files are missing, the loader generates synthetic smoke-test data by default.
 Use `--no-synthetic` to force real data.
 
+As a fallback real-data format, the loader also accepts the public Hugging Face
+feature table:
+
+```text
+data/wesad/WESAD_raw_data.csv
+```
+
+This CSV path is useful for fast real-data smoke tests. Paper-grade claims
+should prefer raw or uniformly preprocessed waveform windows.
+
 ## Smoke Test
 
 ```bash

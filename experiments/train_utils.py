@@ -231,5 +231,24 @@ def train_model(cfg, loaders: Dict[str, object], output_dir: Path) -> Dict[str, 
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "result.json").open("w") as f:
         json.dump(result, f, indent=2)
-    torch.save(model.state_dict(), output_dir / "model.pt")
+    state_dict = model.state_dict()
+    omitted = []
+    if cfg.backbone.backbone == "moment_prefix":
+        # The official frozen MOMENT checkpoint is reloaded from Hugging Face.
+        # Saving it for every method/holdout makes diagnostic artifacts enormous.
+        keep = {}
+        for key, value in state_dict.items():
+            if key.startswith("backbone.moment."):
+                omitted.append(key)
+            else:
+                keep[key] = value
+        state_dict = keep
+    torch.save(
+        {
+            "state_dict": state_dict,
+            "omitted_frozen_backbone_tensors": len(omitted),
+            "backbone": cfg.backbone.backbone,
+        },
+        output_dir / "model.pt",
+    )
     return result

@@ -48,6 +48,14 @@ data/wesad/WESAD_raw_data.csv
 This CSV path is useful for fast real-data smoke tests. Paper-grade claims
 should prefer raw or uniformly preprocessed waveform windows.
 
+For a better real WESAD smoke test, download the public parquet shard:
+
+```bash
+python -m experiments.download_wesad_hf --source parquet_0000 --out-dir data/wesad
+```
+
+This provides `acc`, `bvp`, `eda`, and `temp` window arrays plus stress labels.
+
 ## Smoke Test
 
 ```bash

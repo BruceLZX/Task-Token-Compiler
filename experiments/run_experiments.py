@@ -19,11 +19,11 @@ from typing import Dict, Iterable, List
 
 if __package__:
     from .config import ExperimentConfig
-    from .datasets import build_wesad_loso_loaders
+    from .datasets import build_wesad_loso_loaders, get_available_wesad_sensors
     from .train_utils import train_model
 else:
     from config import ExperimentConfig
-    from datasets import build_wesad_loso_loaders
+    from datasets import build_wesad_loso_loaders, get_available_wesad_sensors
     from train_utils import train_model
 
 
@@ -96,7 +96,14 @@ def run_single(
     elif ablation == "concat_control":
         cfg.method = "compiler_concat"
 
-    train_sensors = [s for s in WESAD_SENSORS if s != holdout_sensor]
+    available_sensors = get_available_wesad_sensors(
+        cfg.data.data_dir, synthetic_if_missing=cfg.data.synthetic_if_missing
+    )
+    if holdout_sensor not in available_sensors:
+        raise ValueError(
+            f"holdout_sensor={holdout_sensor} is unavailable. Available WESAD sensors: {available_sensors}"
+        )
+    train_sensors = [s for s in available_sensors if s != holdout_sensor]
     loaders = build_wesad_loso_loaders(
         data_dir=cfg.data.data_dir,
         train_sensors=train_sensors,
@@ -111,6 +118,7 @@ def run_single(
         synthetic_if_missing=cfg.data.synthetic_if_missing,
         max_windows_per_subject=80,
     )
+    cfg.data.num_classes = int(loaders.get("num_classes", cfg.data.num_classes))
     out_dir = run_root / f"method={cfg.method}" / f"holdout={holdout_sensor}" / f"labels={label_fraction}" / f"seed={seed}" / f"ablation={ablation}"
     return train_model(cfg, loaders, out_dir)
 
@@ -154,7 +162,12 @@ def run_suite(args) -> None:
     cfg = base_config(args)
     methods = parse_csv(args.methods) if args.methods else DEFAULT_METHODS
     seeds = parse_csv(args.seeds, int)
-    holdouts = parse_csv(args.holdouts) if args.holdouts else WESAD_SENSORS
+    if args.holdouts:
+        holdouts = parse_csv(args.holdouts)
+    else:
+        holdouts = get_available_wesad_sensors(
+            cfg.data.data_dir, synthetic_if_missing=cfg.data.synthetic_if_missing
+        )
     label_fractions = parse_csv(args.label_fractions, float)
     run_root = Path(args.output_dir) / args.suite
 

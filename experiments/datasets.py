@@ -123,6 +123,22 @@ SENSOR_REGISTRY: Dict[str, Dict[str, object]] = {
 }
 
 
+def get_available_wesad_sensors(data_dir: str, synthetic_if_missing: bool = True) -> List[str]:
+    """Infer available WESAD sensors from local files."""
+    root = Path(data_dir) / "wesad"
+    if sorted(root.glob("*.parquet")):
+        return ["acc", "bvp", "eda", "temp"]
+    sensors = []
+    for sensor in ["ecg", "eda", "bvp", "acc", "temp", "resp"]:
+        if any((subject_dir / f"{sensor.upper()}.npy").exists() for subject_dir in root.glob("S*")):
+            sensors.append(sensor)
+    if sensors:
+        return sensors
+    if (root / "WESAD_raw_data.csv").exists():
+        return ["ecg"]
+    return ["ecg", "eda", "bvp", "acc", "temp", "resp"] if synthetic_if_missing else []
+
+
 TASK_REGISTRY: Dict[str, Dict[str, int]] = {
     "ecg_diagnosis": {"task_type": 0, "task_description": 0, "num_classes": 5},
     "stress": {"task_type": 0, "task_description": 1, "num_classes": 3},
@@ -238,6 +254,90 @@ class SensorWindowDataset(Dataset):
         }
 
 
+class WESADParquetDataset(Dataset):
+    """Window-level dataset for LouisSimon/wesad-parquet shards."""
+
+    SENSOR_COLUMNS = {
+        "acc": ["acc_x", "acc_y", "acc_z"],
+        "bvp": ["bvp"],
+        "eda": ["eda"],
+        "temp": ["temp"],
+    }
+
+    def __init__(
+        self,
+        parquet_files: Sequence[Path],
+        sensor: str,
+        window_len: int,
+        max_rows: int | None = None,
+    ):
+        if sensor not in self.SENSOR_COLUMNS:
+            raise ValueError(f"Parquet WESAD source does not contain sensor={sensor}")
+        try:
+            import duckdb
+        except ImportError as exc:
+            raise ImportError("Install duckdb to load WESAD parquet shards") from exc
+
+        self.sensor = sensor
+        self.task = "stress"
+        self.window_len = int(window_len)
+        self.rows: List[Tuple[str, int, np.ndarray]] = []
+        cols = self.SENSOR_COLUMNS[sensor]
+        select_cols = ", ".join(cols + ["stress", "user"])
+        files_sql = ", ".join([f"'{str(p)}'" for p in parquet_files])
+        limit_sql = f" LIMIT {int(max_rows)}" if max_rows else ""
+        query = f"SELECT {select_cols} FROM read_parquet([{files_sql}]) WHERE stress IS NOT NULL{limit_sql}"
+        df = duckdb.connect().execute(query).fetchdf()
+        for _, row in df.iterrows():
+            arrays = [np.asarray(row[col], dtype=np.float32) for col in cols]
+            if len(arrays) == 1:
+                x = arrays[0]
+            else:
+                min_len = min(len(a) for a in arrays)
+                x = np.stack([a[:min_len] for a in arrays], axis=1)
+            label = int(row["stress"])
+            user = str(row["user"])
+            if not user.upper().startswith("S"):
+                user = f"S{user}"
+            self.rows.append((user, label, x))
+        self.indices = [SampleIndex(subject=user, start=i, label=label) for i, (user, label, _) in enumerate(self.rows)]
+
+    @property
+    def subjects(self) -> List[str]:
+        return [idx.subject for idx in self.indices]
+
+    @property
+    def num_classes(self) -> int:
+        labels = [idx.label for idx in self.indices]
+        return max(labels) + 1 if labels else 2
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, item: int):
+        subject, label, x = self.rows[item]
+        if x.ndim == 2:
+            x = x.mean(axis=-1)
+        if len(x) > self.window_len:
+            x = x[: self.window_len]
+        elif len(x) < self.window_len:
+            x = np.pad(x, (0, self.window_len - len(x)), mode="constant")
+        x = x.astype(np.float32)
+        std = float(x.std())
+        if std > 1e-6:
+            x = (x - float(x.mean())) / std
+        rate = float(SENSOR_REGISTRY[self.sensor]["sampling_rate"])
+        duration = self.window_len / max(rate, 1.0)
+        metadata = make_metadata(self.sensor, self.task, duration, rate)
+        return {
+            "x": torch.from_numpy(x).float().unsqueeze(0),
+            "y": torch.tensor(label, dtype=torch.long),
+            "metadata": metadata,
+            "subject": subject,
+            "sensor": self.sensor,
+        }
+
+
 def _synthetic_wesad_sensor(
     sensor: str,
     subject: str,
@@ -307,6 +407,16 @@ def load_wesad_sensor(
         n = min(len(signal), len(label))
         signals[subject_dir.name] = signal[:n]
         labels[subject_dir.name] = label[:n]
+
+    if not signals:
+        parquet_files = sorted(root.glob("*.parquet"))
+        if parquet_files:
+            return WESADParquetDataset(
+                parquet_files,
+                sensor=sensor,
+                window_len=window_len,
+                max_rows=max_windows_per_subject,
+            )
 
     if not signals:
         csv_path = root / "WESAD_raw_data.csv"
@@ -527,11 +637,14 @@ def build_wesad_loso_loaders(
 
     train_ds = ConcatDataset(train_parts)
     val_ds = ConcatDataset(val_parts)
+    num_classes = max(
+        [getattr(part.dataset if isinstance(part, Subset) else part, "num_classes", 2) for part in train_parts + [test_ds]]
+    )
     return {
         "train": make_loader(train_ds, batch_size, True, num_workers),
         "val": make_loader(val_ds, batch_size * 2, False, num_workers),
         "test": make_loader(test_ds, batch_size * 2, False, num_workers),
-        "num_classes": 3,
+        "num_classes": num_classes,
         "train_size": len(train_ds),
         "val_size": len(val_ds),
         "test_size": len(test_ds),

@@ -527,6 +527,20 @@ def split_by_subject(
     seed: int,
 ) -> Tuple[Subset, Subset, Subset]:
     subjects = np.array(sorted(set(dataset.subjects)))
+    if len(subjects) < 3:
+        # Tiny downloaded shards may contain only one subject. This fallback is
+        # for smoke tests only; paper-grade runs must use subject-level splits.
+        rng = np.random.default_rng(seed)
+        idx = np.arange(len(dataset))
+        rng.shuffle(idx)
+        n_test = max(1, int(round(len(idx) * test_frac)))
+        n_val = max(1, int(round(len(idx) * val_frac)))
+        test_idx = idx[:n_test].tolist()
+        val_idx = idx[n_test : n_test + n_val].tolist()
+        train_idx = idx[n_test + n_val :].tolist()
+        if not train_idx:
+            train_idx = val_idx
+        return Subset(dataset, train_idx), Subset(dataset, val_idx), Subset(dataset, test_idx)
     rng = np.random.default_rng(seed)
     rng.shuffle(subjects)
     n_test = max(1, int(round(len(subjects) * test_frac)))

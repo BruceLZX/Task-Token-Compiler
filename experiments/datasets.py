@@ -304,7 +304,14 @@ class WESADParquetDataset(Dataset):
             else:
                 min_len = min(len(a) for a in arrays)
                 x = np.stack([a[:min_len] for a in arrays], axis=1)
-            label = int(row["stress"])
+            raw_label = int(row["stress"])
+            # Public WESAD parquet uses the original WESAD stress labels:
+            # 1=baseline, 2=stress, 3=amusement. Match the numpy loader's
+            # contiguous 0/1/2 class convention so the head has no empty class.
+            label_map = {1: 0, 2: 1, 3: 2}
+            if raw_label not in label_map:
+                continue
+            label = label_map[raw_label]
             user = str(row["user"])
             if not user.upper().startswith("S"):
                 user = f"S{user}"

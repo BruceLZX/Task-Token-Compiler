@@ -48,6 +48,86 @@ class PatchTransformerBackbone(nn.Module):
         return encoded
 
 
+class MomentPrefixBackbone(nn.Module):
+    """Frozen official MOMENT encoder with per-sample prefix token injection."""
+
+    MODEL_IDS = {
+        "small": "AutonLab/MOMENT-1-small",
+        "base": "AutonLab/MOMENT-1-base",
+        "large": "AutonLab/MOMENT-1-large",
+    }
+
+    def __init__(self, config):
+        super().__init__()
+        try:
+            from momentfm import MOMENTPipeline
+            from momentfm.utils.masking import Masking
+        except ImportError as exc:
+            raise ImportError(
+                "momentfm is required for backbone=moment_prefix. Install "
+                "experiments/requirements.txt in Python 3.11, or run inside the "
+                "Space MOMENT venv."
+            ) from exc
+
+        variant = config.backbone.moment_variant
+        model_id = self.MODEL_IDS.get(variant, variant)
+        self.moment = MOMENTPipeline.from_pretrained(
+            model_id,
+            model_kwargs={"task_name": "embedding"},
+        )
+        self.moment.init()
+        self.masking = Masking
+        self.d_model = int(self.moment.config.d_model)
+        self.patch_len = int(self.moment.patch_len)
+
+        for param in self.moment.parameters():
+            param.requires_grad = False
+        self.moment.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.moment.eval()
+        return self
+
+    def forward(self, x: torch.Tensor, prefix_tokens: Optional[torch.Tensor] = None):
+        batch_size, n_channels, seq_len = x.shape
+        input_mask = torch.ones((batch_size, seq_len), device=x.device, dtype=x.dtype)
+
+        x_enc = self.moment.normalizer(x=x, mask=input_mask, mode="norm")
+        x_enc = torch.nan_to_num(x_enc, nan=0, posinf=0, neginf=0)
+        x_enc = self.moment.tokenizer(x=x_enc)
+        enc_in = self.moment.patch_embedding(x_enc, mask=input_mask)
+
+        n_patches = enc_in.shape[2]
+        enc_in = enc_in.reshape(batch_size * n_channels, n_patches, self.d_model)
+        attention_mask = self.masking.convert_seq_to_patch_view(
+            input_mask, self.patch_len
+        ).repeat_interleave(n_channels, dim=0)
+
+        n_prefix = 0
+        if prefix_tokens is not None:
+            n_prefix = prefix_tokens.shape[1]
+            prefix = prefix_tokens.repeat_interleave(n_channels, dim=0)
+            enc_in = torch.cat([prefix, enc_in], dim=1)
+            prefix_mask = torch.ones(
+                enc_in.shape[0],
+                n_prefix,
+                device=x.device,
+                dtype=attention_mask.dtype,
+            )
+            attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+
+        outputs = self.moment.encoder(inputs_embeds=enc_in, attention_mask=attention_mask)
+        enc_out = outputs.last_hidden_state
+        if n_prefix:
+            enc_out = enc_out[:, n_prefix:, :]
+        enc_out = enc_out.reshape(batch_size, n_channels, n_patches, self.d_model)
+
+        # Return patch tokens after channel averaging. The prefix has influenced
+        # the frozen encoder through attention, but is not used as a readout shortcut.
+        return enc_out.mean(dim=1)
+
+
 class AdapterBlock(nn.Module):
     """Tiny bottleneck adapter used as a PEFT baseline."""
 
@@ -132,14 +212,13 @@ class TaskSensorModel(nn.Module):
         super().__init__()
         self.config = config
         self.method = config.method
-        if config.backbone.backbone != "patch_transformer":
-            raise NotImplementedError(
-                "Only the prefix-capable patch_transformer backbone is wired in this "
-                "experiment harness. For paper-grade MOMENT runs, expose MOMENT's "
-                "patch embeddings and encoder so compiled tokens can be inserted "
-                "before the transformer, not after feature extraction."
-            )
-        self.backbone = PatchTransformerBackbone(config)
+        if config.backbone.backbone == "patch_transformer":
+            self.backbone = PatchTransformerBackbone(config)
+        elif config.backbone.backbone == "moment_prefix":
+            self.backbone = MomentPrefixBackbone(config)
+            config.backbone.d_model = self.backbone.d_model
+        else:
+            raise NotImplementedError(f"Unknown backbone: {config.backbone.backbone}")
         d_model = config.backbone.d_model
         num_classes = config.data.num_classes
 
@@ -167,6 +246,8 @@ class TaskSensorModel(nn.Module):
         elif self.method == "adapter":
             self.adapter = AdapterBlock(d_model)
         elif self.method == "lora":
+            if config.backbone.backbone != "patch_transformer":
+                raise NotImplementedError("lora is currently wired only for patch_transformer")
             apply_lora_to_transformer_ffn(self.backbone.encoder, rank=config.backbone.lora_rank)
         elif self.method != "frozen_probe":
             raise ValueError(f"Unknown method: {self.method}")

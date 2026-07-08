@@ -66,7 +66,7 @@ class CompilerConfig:
 class BackboneConfig:
     """Prefix-capable time-series backbone."""
 
-    backbone: Literal["patch_transformer", "moment_features"] = "patch_transformer"
+    backbone: Literal["patch_transformer", "moment_prefix"] = "patch_transformer"
     d_model: int = 256
     patch_len: int = 16
     num_layers: int = 4
@@ -76,9 +76,8 @@ class BackboneConfig:
     lora_rank: int = 8
     init_checkpoint: Optional[str] = None
 
-    # MOMENT feature mode is a baseline only; true prefix injection requires an
-    # exposed patch embedding + encoder path.
-    moment_variant: Literal["small", "base", "large"] = "base"
+    # Official MOMENT checkpoint used by the prefix-injection backbone.
+    moment_variant: Literal["small", "base", "large"] = "small"
 
 
 @dataclass

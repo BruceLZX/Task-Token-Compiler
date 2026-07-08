@@ -57,6 +57,8 @@ def base_config(args) -> ExperimentConfig:
     cfg.data.window_len = args.window_len
     cfg.data.num_workers = args.num_workers
     cfg.data.max_windows_per_subject = args.max_windows_per_subject
+    cfg.backbone.backbone = args.backbone
+    cfg.backbone.moment_variant = args.moment_variant
     cfg.backbone.freeze_backbone = not args.unfreeze_backbone
     cfg.backbone.lora_rank = args.lora_rank
     cfg.backbone.init_checkpoint = args.init_backbone_checkpoint or None
@@ -243,6 +245,8 @@ def main() -> None:
     parser.add_argument("--window-len", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-windows-per-subject", type=int, default=80)
+    parser.add_argument("--backbone", choices=["patch_transformer", "moment_prefix"], default="patch_transformer")
+    parser.add_argument("--moment-variant", choices=["small", "base", "large"], default="small")
     parser.add_argument("--structure-loss-weight", type=float, default=0.01)
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--init-backbone-checkpoint", default="")
